@@ -13,6 +13,8 @@ type ValueStruct struct {
 	UserMeta  byte
 	ExpiresAt uint64
 	Value     []byte
+
+	Version uint64 // This field is not serialized. Only for internal usage.
 }
 
 func sizeVarint(x uint64) (n int) {
@@ -26,7 +28,7 @@ func sizeVarint(x uint64) (n int) {
 	return n
 }
 
-func (v *ValueStruct) EncodeSize() uint16 {
+func (v *ValueStruct) EncodedSize() uint16 {
 	sz := len(v.Value) + 2 // meta, usermeta
 	if v.ExpiresAt == 0 {
 		return uint16(sz + 1)
@@ -46,7 +48,7 @@ func (v *ValueStruct) Decode(b []byte) {
 func (v *ValueStruct) Encode(b []byte) {
 	b[0] = v.Meta
 	b[1] = v.UserMeta
-	sz := -binary.PutUvarint(b[2:], v.ExpiresAt)
+	sz := binary.PutUvarint(b[2:], v.ExpiresAt)
 	copy(b[2+sz:], v.Value)
 }
 
