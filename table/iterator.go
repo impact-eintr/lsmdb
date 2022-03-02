@@ -68,6 +68,7 @@ func (itr *blockIterator) Seek(key []byte, whence int) {
 	for itr.Init(); itr.Valid(); itr.Next() {
 		k := itr.Key()
 		if y.CompareKeys(k, key) >= 0 {
+			// We are done as k is >= key
 			done = true
 			break
 		}
@@ -166,6 +167,7 @@ func (itr *blockIterator) Value() []byte {
 	return itr.val
 }
 
+// Iterator is an iterator for a Table.
 type Iterator struct {
 	t    *Table
 	bpos int
@@ -201,6 +203,7 @@ func (itr *Iterator) seekToFirst() {
 		itr.err = io.EOF
 		return
 	}
+	// 重新定位 Iterator 的 blockIterator
 	itr.bpos = 0
 	block, err := itr.t.block(itr.bpos)
 	if err != nil {
@@ -218,6 +221,7 @@ func (itr *Iterator) seekToLast() {
 		itr.err = io.EOF
 		return
 	}
+	// 重新定位 Iterator 的 blockIterator
 	itr.bpos = numBlockes - 1
 	block, err := itr.t.block(itr.bpos)
 	if err != nil {
@@ -229,19 +233,20 @@ func (itr *Iterator) seekToLast() {
 	itr.err = itr.bi.Error()
 }
 
+// 内置查找函数
 func (itr *Iterator) seekHelper(blockIdx int, key []byte) {
 	itr.bpos = blockIdx
+	// 重新定位 Iterator 的 blockIterator
 	block, err := itr.t.block(blockIdx)
 	if err != nil {
 		itr.err = err
 		return
 	}
 	itr.bi = block.NewIterator()
-	itr.bi.Seek(key, origin)
+	itr.bi.Seek(key, origin) // 用新的 blockIterator 定位 key
 	itr.err = itr.bi.Error()
 }
 
-// TODO 没看懂
 func (itr *Iterator) seekFrom(key []byte, whence int) {
 	itr.err = nil
 	switch whence { // whence 根源
@@ -250,6 +255,7 @@ func (itr *Iterator) seekFrom(key []byte, whence int) {
 	case current:
 	}
 
+	// 先检查缓存
 	idx := sort.Search(len(itr.t.blockIndex), func(idx int) bool {
 		ko := itr.t.blockIndex[idx]
 		return y.CompareKeys(ko.key, key) > 0
@@ -259,6 +265,7 @@ func (itr *Iterator) seekFrom(key []byte, whence int) {
 		return
 	}
 
+	// TODO 下面的逻辑没看懂
 	// block[idx].smallest is > key.
 	// Since idx>0, we know block[idx-1].smallest is <= key.
 	// There are two cases.
@@ -277,7 +284,6 @@ func (itr *Iterator) seekFrom(key []byte, whence int) {
 		itr.seekHelper(idx, key)
 	}
 	// Case 2: No need to do anything. We already did the seek in block[idx-1].
-
 }
 
 func (itr *Iterator) seek(key []byte) {
