@@ -64,7 +64,7 @@ func Copy(a []byte) []byte {
 	return b
 }
 
-// KeyWithTs key+ts ts can be a time.Now().Unix()
+// KeyWithTs key+ts ts: tanscation 事务ID
 func KeyWithTs(key []byte, ts uint64) []byte {
 	out := make([]byte, len(key)+8)
 	copy(out, key)
