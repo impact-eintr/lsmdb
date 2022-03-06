@@ -178,7 +178,7 @@ type Iterator struct {
 }
 
 func (t *Table) NewIterator(reversed bool) *Iterator {
-	t.IncrRef() // Notice Important
+	t.IncrRef() // NOTE: Important
 	ti := &Iterator{t: t, reversed: reversed}
 	ti.next()
 	return ti

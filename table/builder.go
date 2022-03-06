@@ -117,16 +117,16 @@ func (b *Builder) addHelper(key []byte, v y.ValueStruct) {
 	b.counter++
 }
 
-// TODO ?
+// 通过添加空结构表示结束
 func (b *Builder) finishBlock() {
 	b.addHelper([]byte{}, y.ValueStruct{})
 }
 
 func (b *Builder) Add(key []byte, value y.ValueStruct) error {
 	if b.counter >= resultInterval {
-		// remake
+		// 每100个 k-v 分割一次
 		b.finishBlock()
-		b.restarts = append(b.restarts, uint32(b.buf.Len()))
+		b.restarts = append(b.restarts, uint32(b.buf.Len())) // 标记分割块的块偏移
 		b.counter = 0
 		b.baseKey = []byte{}
 		b.baseOffset = uint32(b.buf.Len())
@@ -142,19 +142,20 @@ func (b *Builder) ReachedCapacity(cap int64) bool {
 	return int64(estimateSz) > cap
 }
 
-// blockIndex 为 Table 生成块索引。它主要是所有块基偏移量的列表。
+// blockIndex 为 Table 生成块索引。它主要是所有分割块的块基偏移量的列表。
 func (b *Builder) blockIndex() []byte {
 	// Store the end offset, so we know the length of the final block.
 	b.restarts = append(b.restarts, uint32(b.buf.Len()))
 
 	// Add 4 because we want to write out number of restarts at the end.
-	sz := 4*len(b.restarts) + 4
+	sz := 4*len(b.restarts) + 4 // 4 是restarts的位置
 	out := make([]byte, sz)
 	buf := out
 	for _, r := range b.restarts {
 		binary.BigEndian.PutUint32(buf[:4], r)
 		buf = buf[4:]
 	}
+	// TODO 这里不会覆盖数据吗？
 	binary.BigEndian.PutUint32(buf[:4], uint32(len(b.restarts)))
 	return out
 }
@@ -165,18 +166,20 @@ func (b *Builder) Finish() []byte {
 	var klen [2]byte
 	key := make([]byte, 1024)
 	for {
+		// 先解析keysize
 		if _, err := b.keyBuf.Read(klen[:]); err == io.EOF {
 			break
 		} else if err != nil {
 			y.Check(err)
 		}
+		// 根据keysize 读取key
 		kl := int(binary.BigEndian.Uint16(klen[:]))
 		if cap(key) < kl {
 			key = make([]byte, 2*kl)
 		}
 		key = key[:kl]
 		y.Check2(b.keyBuf.Read(key))
-		bf.Add(key)
+		bf.Add(key) // 向 Bloom Filter 添加当前Key
 	}
 
 	b.finishBlock() // This will never start a new block.
@@ -192,5 +195,4 @@ func (b *Builder) Finish() []byte {
 	b.buf.Write(buf[:])
 
 	return b.buf.Bytes()
-
 }

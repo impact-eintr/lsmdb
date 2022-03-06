@@ -95,7 +95,7 @@ func (s *levelHandler) validate() error {
 // 	y.Printf("\n")
 // }
 
-// reserveFileID reserves a unique file id.
+// reserveFileID 保留一个唯一的文件 ID
 func (s *levelsController) reserveFileID() uint64 {
 	id := atomic.AddUint64(&s.nextFileID, 1)
 	return id - 1
