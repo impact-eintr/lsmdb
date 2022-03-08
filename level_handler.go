@@ -143,7 +143,7 @@ func newLevelHandler(db *DB, level int) *levelHandler {
 	}
 }
 
-func (s *levelHandler) tryAddLevel0Tabel(t *table.Table) bool {
+func (s *levelHandler) tryAddLevel0Table(t *table.Table) bool {
 	y.AssertTrue(s.level == 0)
 	// Need lock as we may be deleting the first table during a level 0 compaction.
 	s.Lock()

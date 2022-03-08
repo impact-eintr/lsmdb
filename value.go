@@ -9,12 +9,15 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math"
+	"math/rand"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/impact-eintr/lsmdb/y"
 	"github.com/pkg/errors"
@@ -657,7 +660,7 @@ func (vlog *valueLog) writableOffset() uint32 {
 
 func (vlog *valueLog) write(reqs []*request) error {
 	vlog.filesLock.RLock()
-	curlf := vlog.filesMap[vlog.maxFid]
+	curlf := vlog.filesMap[vlog.maxFid] // 目前正在写的日志文件
 	vlog.filesLock.RUnlock()
 
 	toDisk := func() error {
@@ -738,37 +741,247 @@ func (vlog *valueLog) getFileRLocked(fid uint32) (*logFile, error) {
 }
 
 func (vlog *valueLog) Read(vp valuePointer) ([]byte, func(), error) {
+	if vp.Fid == vlog.maxFid && vp.Offset >= vlog.writableOffset() {
+		return nil, nil, errors.Errorf(
+			"Invalid value pointer offset: %d greater than current offset: %d",
+			vp.Offset, vlog.writableOffset())
+	}
 
+	buf, cb, err := vlog.readValueBytes(vp)
+	if err != nil {
+		return nil, cb, err
+	}
+	var h header
+	h.Decode(buf)
+	n := uint32(headerBufSize) + h.klen
+	return buf[n : n+h.vlen], cb, nil
 }
 
 func (vlog *valueLog) readValueBytes(vp valuePointer) ([]byte, func(), error) {
+	lf, err := vlog.getFileRLocked(vp.Fid)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "Unable to read from value log: %+v", vp)
+	}
 
+	buf, err := lf.read(vp)
+	return buf, lf.lock.RUnlock, err
 }
 
 func valueBytesToEntry(buf []byte) (e entry) {
+	var h header
+	h.Decode(buf)
+	n := uint32(headerBufSize)
 
+	e.Key = buf[n : n+h.klen]
+	n += h.klen
+	e.meta = h.meta
+	e.UserMeta = h.userMeta
+	e.Value = buf[n : n+h.vlen]
+	return
 }
 
+// 根据head找到对应的 log 文件
 func (vlog *valueLog) pickLog(head valuePointer) *logFile {
+	vlog.filesLock.RLock()
+	defer vlog.filesLock.RUnlock()
+	fids := vlog.sortedFids()
+	if len(fids) <= 1 || head.Fid == 0 {
+		return nil
+	}
 
+	i := sort.Search(len(fids), func(i int) bool {
+		return fids[i] == head.Fid
+	})
+	if i == len(fids) {
+		return nil
+	}
+
+	// 选择包含最多可丢弃数据的候选者
+	candidate := struct {
+		fid     uint32
+		discard int64
+	}{math.MaxUint32, 0}
+	vlog.lfDiscardStats.Lock()
+	for j := 0; j < i; j++ {
+		fid := fids[j]
+		if vlog.lfDiscardStats.m[fid] > candidate.discard {
+			candidate.fid = fids[j]
+			candidate.discard = vlog.lfDiscardStats.m[fid]
+		}
+	}
+	vlog.lfDiscardStats.Unlock()
+
+	if candidate.fid != math.MaxUint32 { // Found a candidate
+		return vlog.filesMap[candidate.fid]
+	}
+
+	// Fallback to randomly picking a log file
+	idx := rand.Intn(i) // Don’t include head.Fid. We pick a random file before it.
+	if idx > 0 {
+		idx = rand.Intn(idx + 1) // Another level of rand to favor smaller fids.
+	}
+	return vlog.filesMap[fids[idx]]
 }
 
 func discardEntry(e entry, vs y.ValueStruct) bool {
+	if vs.Version != y.ParseTs(e.Key) {
+		// Version not found. Discard.
+		return true
+	}
+	if isDeletedOrExpired(vs) {
+		return true
+	}
+	if (vs.Meta & bitValuePointer) == 0 {
+		// Key also stores the value in LSM. Discard.
+		return true
+	}
+	if (vs.Meta & bitFinTxn) > 0 {
+		// Just a txn finish entry. Discard.
+		return true
+	}
+	return false
 
 }
 
 func (vlog *valueLog) doRunGC(gcThreshold float64, head valuePointer) (err error) {
+	// Pick a log file for GC
+	lf := vlog.pickLog(head)
+	if lf == nil {
+		return ErrNoRewrite
+	}
 
+	// Update stas before exiting
+	defer func() {
+		vlog.lfDiscardStats.Lock()
+		delete(vlog.lfDiscardStats.m, lf.fid)
+		vlog.lfDiscardStats.Unlock()
+	}()
+
+	type reason struct {
+		total   float64
+		keep    float64
+		discard float64
+	}
+
+	var r reason
+	var window = 100.0
+	var count = 0
+
+	// Pick a random start point for the log
+	skipFirstM := float64(rand.Intn(int(vlog.opt.ValueLogFileSize/mi))) - window
+	var skipped float64
+
+	start := time.Now()
+	y.AssertTrue(vlog.kv != nil)
+	err = vlog.iterate(lf, 0, func(e entry, vp valuePointer) error {
+		esz := float64(vp.Len) / (1 << 20) // in MBs. +4 for the CAS stuff.
+		skipped += esz
+		if skipped < skipFirstM {
+			return nil
+		}
+
+		count++
+		if count%100 == 0 {
+			time.Sleep(time.Millisecond)
+		}
+		r.total += esz
+		if r.total > window {
+			return errStop
+		}
+		if time.Since(start) > 10*time.Second {
+			return errStop
+		}
+
+		vs, err := vlog.kv.get(e.Key)
+		if err != nil {
+			return err
+		}
+		if discardEntry(e, vs) {
+			r.discard += esz
+			return nil
+		}
+		// Value is still present in value log.
+		y.AssertTrue(len(vs.Value) > 0)
+		vp.Decode(vs.Value)
+
+		if vp.Fid > lf.fid {
+			// Value is present in a later log. Discard.
+			r.discard += esz
+			return nil
+		}
+		if vp.Offset > e.offset {
+			// Value is present in a later offset, but in the same log.
+			r.discard += esz
+			return nil
+		}
+		if vp.Fid == lf.fid && vp.Offset == e.offset {
+			// This is still the active entry. This would need to be rewritten.
+			r.keep += esz
+
+		} else {
+			vlog.elog.Printf("Reason=%+v\n", r)
+
+			buf, cb, err := vlog.readValueBytes(vp)
+			if err != nil {
+				return errStop
+			}
+			ne := valueBytesToEntry(buf)
+			ne.offset = vp.Offset
+			ne.print("Latest Entry Header in LSM")
+			e.print("Latest Entry in Log")
+			runCallback(cb)
+			return errors.Errorf("This shouldn't happen. Latest Pointer:%+v. Meta:%v.",
+				vp, vs.Meta)
+		}
+		return nil
+	})
+
+	if err != nil {
+		vlog.elog.Errorf("Error while iterating for RunGC: %v", err)
+		return err
+	}
+	vlog.elog.Printf("Fid: %d Data status=%+v\n", lf.fid, r)
+
+	if r.total < 10.0 || r.discard < gcThreshold*r.total {
+		vlog.elog.Printf("Skipping GC on fid: %d\n\n", lf.fid)
+		return ErrNoRewrite
+	}
+
+	vlog.elog.Printf("REWRITING VLOG %d\n", lf.fid)
+	if err = vlog.rewrite(lf); err != nil {
+		return err
+	}
+	vlog.elog.Printf("Done rewriting.")
+	return nil
 }
 
 func (vlog *valueLog) waitOnGC(lc *y.Closer) {
+	defer lc.Done()
 
+	<-lc.HasBeenClosed()
+
+	// 最终退出的时候会调用GC
+	vlog.garbageCh <- struct{}{}
 }
 
 func (vlog *valueLog) runGC(gcThreshold float64, head valuePointer) error {
-
+	select {
+	case vlog.garbageCh <- struct{}{}:
+		// Run GC
+		err := vlog.doRunGC(gcThreshold, head)
+		<-vlog.garbageCh
+		return err
+	default:
+		return ErrRejected
+	}
 }
 
 func (vlog *valueLog) updateGCStats(item *Item) {
-
+	if item.meta&bitValuePointer > 0 {
+		var vp valuePointer
+		vp.Decode(item.vptr)
+		vlog.lfDiscardStats.Lock()
+		vlog.lfDiscardStats.m[vp.Fid] += int64(vp.Len)
+		vlog.lfDiscardStats.Unlock()
+	}
 }

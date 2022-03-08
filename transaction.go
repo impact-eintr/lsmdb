@@ -5,6 +5,7 @@ import (
 	"container/heap"
 	"fmt"
 	"math"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -328,6 +329,67 @@ func (txn *Txn) Discard() {
 	if txn.update {
 		txn.db.orc.decrRef()
 	}
+}
+
+// Commit commits the transaction, following these steps:
+//
+// 1. If there are no writes, return immediately.
+//
+// 2. Check if read rows were updated since txn started. If so, return ErrConflict.
+//
+// 3. If no conflict, generate a commit timestamp and update written rows' commit ts.
+//
+// 4. Batch up all writes, write them to value log and LSM tree.
+//
+// 5. If callback is provided, Badger will return immediately after checking
+// for conflicts. Writes to the database will happen in the background.  If
+// there is a conflict, an error will be returned and the callback will not
+// run. If there are no conflicts, the callback will be called in the
+// background upon successful completion of writes or any error during write.
+//
+// If error is nil, the transaction is successfully committed. In case of a non-nil error, the LSM
+// tree won't be updated, so there's no need for any rollback.
+func (txn *Txn) Commit(callback func(error)) error {
+	if txn.commitTs == 0 && txn.db.opt.managedTxns {
+		return ErrManagedTxn
+	}
+	if txn.discarded {
+		return ErrDiscardedTxn
+	}
+	defer txn.Discard()
+	if len(txn.writes) == 0 {
+		return nil // Nothing to write
+	}
+
+	state := txn.db.orc
+	commitTs := state.newCommitTs(txn)
+	if commitTs == 0 {
+		return ErrConflict
+	}
+	defer state.doneCommit(commitTs)
+
+	entries := make([]*entry, 0, len(txn.pendingWrites)+1)
+	for _, e := range txn.pendingWrites {
+		// Suffix the keys with commit ts, so the key versions are sorted in
+		// descending order of commit timestamp.
+		e.Key = y.KeyWithTs(e.Key, commitTs)
+		e.meta |= bitTxn
+		entries = append(entries, e)
+	}
+	e := &entry{
+		Key:   y.KeyWithTs(txnKey, commitTs),
+		Value: []byte(strconv.FormatUint(commitTs, 10)),
+		meta:  bitFinTxn,
+	}
+	entries = append(entries, e) // 将新的写事务添加到待执行任务中
+	if callback == nil {
+		// If batchSet failed, LSM would not have been updated. So, no need to rollback anything.
+
+		// TODO: What if some of the txns successfully make it to value log, but others fail.
+		// Nothing gets updated to LSM, until a restart happens.
+		return txn.db.batchSet(entries)
+	}
+	return txn.db.batchSetAsync(entries, callback)
 }
 
 func (db *DB) NewTransaction(update bool) *Txn {

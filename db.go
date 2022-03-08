@@ -1,11 +1,14 @@
 package lsmdb
 
 import (
+	"bytes"
 	"container/heap"
 	"expvar"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -41,7 +44,7 @@ type DB struct {
 	mt        *skl.Skiplist   // Out lastest (actively written) in-memory table.
 	imm       []*skl.Skiplist // Add here only AFTER pushing to flushChan.
 	opt       Options
-	mainfest  *manifestFile
+	manifest  *manifestFile
 	lc        *levelsController
 	vlog      valueLog
 	vptr      valuePointer // Less than or equal to a pointer to the vlog value put into mt
@@ -55,14 +58,93 @@ const (
 	kvWriteChCapacity = 1000
 )
 
-func replyFunction(out *DB) func(entry, valuePointer) error {
+func replayFunction(out *DB) func(entry, valuePointer) error {
+	type txnEntry struct {
+		nk []byte
+		v  y.ValueStruct
+	}
 
+	var txn []txnEntry
+	var lastCommit uint64
+
+	toLSM := func(nk []byte, vs y.ValueStruct) {
+		for err := out.ensureRoomForWrite(); err != nil; err = out.ensureRoomForWrite() {
+			out.elog.Printf("Replay: Making room for writes")
+			time.Sleep(10 * time.Millisecond)
+		}
+		out.mt.Put(nk, vs)
+	}
+
+	first := true
+	return func(e entry, vp valuePointer) error {
+		if first {
+			out.elog.Printf("First key=%s\n", e.Key)
+		}
+		first = false
+
+		if out.orc.curRead < y.ParseTs(e.Key) {
+			out.orc.curRead = y.ParseTs(e.Key)
+		}
+
+		nk := make([]byte, len(e.Key))
+		copy(nk, e.Key)
+		var nv []byte
+		meta := e.meta
+		if out.shouldWriteValueToLSM(e) {
+			nv = make([]byte, len(e.Value))
+			copy(nv, e.Value)
+		} else {
+			nv = make([]byte, vptrSize)
+			vp.Encode(nv)
+			meta = meta | bitValuePointer
+		}
+
+		v := y.ValueStruct{
+			Value:    nv,
+			Meta:     meta,
+			UserMeta: e.UserMeta,
+		}
+
+		if e.meta&bitFinTxn > 0 {
+			txnTs, err := strconv.ParseUint(string(e.Value), 10, 64)
+			if err != nil {
+				return errors.Wrapf(err, "Unable to parse txn fin: %q", e.Value)
+			}
+			y.AssertTrue(lastCommit == txnTs)
+			y.AssertTrue(len(txn) > 0)
+			// Got the end of txn. Now we can store them.
+			for _, t := range txn {
+				toLSM(t.nk, t.v)
+			}
+			txn = txn[:0]
+			lastCommit = 0
+
+		} else if e.meta&bitTxn == 0 {
+			// This entry is from a rewrite.
+			toLSM(nk, v)
+
+			// We shouldn't get this entry in the middle of a transaction.
+			y.AssertTrue(lastCommit == 0)
+			y.AssertTrue(len(txn) == 0)
+
+		} else {
+			txnTs := y.ParseTs(nk)
+			if lastCommit == 0 {
+				lastCommit = txnTs
+			}
+			y.AssertTrue(lastCommit == txnTs)
+			te := txnEntry{nk: nk, v: v}
+			txn = append(txn, te)
+		}
+
+		return nil
+	}
 }
 
 func Open(opt Options) (db *DB, err error) {
 	// 1. 构造配置参数对象
 	opt.maxBatchSize = (15 * opt.MaxTableSize) / 100
-	opt.maxBatchCount = opt.maxBatchCount / int64(skl.MaxNodeSize)
+	opt.maxBatchCount = opt.maxBatchSize / int64(skl.MaxNodeSize)
 
 	// 2. 打开或创建工作目录并上锁
 	for _, path := range []string{opt.Dir, opt.ValueDir} {
@@ -140,7 +222,7 @@ func Open(opt Options) (db *DB, err error) {
 		// 配置对象
 		opt: opt,
 		// manifest文件对象
-		mainfest: manifestFile,
+		manifest: manifestFile,
 		elog:     trace.NewEventLog("lsmdb", "DB"),
 		// 目录锁
 		dirLockGuard: dirLockGuard,
@@ -189,7 +271,7 @@ func Open(opt Options) (db *DB, err error) {
 	replayCloser := y.NewCloser(1)
 	go db.doWrites(replayCloser)
 
-	if err = db.vlog.Replay(vptr, replyFunction(db)); err != nil {
+	if err = db.vlog.Replay(vptr, replayFunction(db)); err != nil {
 		return db, err
 	}
 
@@ -211,14 +293,91 @@ func Open(opt Options) (db *DB, err error) {
 	db.closers.valueGC = y.NewCloser(1)
 	go db.vlog.waitOnGC(db.closers.valueGC)
 
+	// 使用过的值清空(TODO GC friendly? 有必要吗)
 	valueDirLockGuard = nil
 	dirLockGuard = nil
 	manifestFile = nil
 	return db, nil
-
 }
 
 func (db *DB) Close() (err error) {
+	db.elog.Printf("Closing database")
+	// Stop value GC first.
+	db.closers.valueGC.SignalAndWait()
+
+	// Stop writes next.
+	db.closers.writes.SignalAndWait()
+
+	// Now close the value log.
+	if vlogErr := db.vlog.Close(); err == nil {
+		err = errors.Wrap(vlogErr, "DB.Close")
+	}
+
+	if !db.mt.Empty() {
+		db.elog.Printf("Flushing memtable")
+		for {
+			pushedFlushTask := func() bool {
+				db.Lock()
+				defer db.Unlock()
+				y.AssertTrue(db.mt != nil)
+				select {
+				case db.flushChan <- flushTask{db.mt, db.vptr}:
+					db.imm = append(db.imm, db.mt) // Flusher will attempt to remove this from s.imm.
+					db.mt = nil                    // Will segfault if we try writing! NOTE 一个小技巧
+					db.elog.Printf("pushed to flush chan\n")
+					return true
+				default:
+					// If we fail to push, we need to unlock and wait for a short while.
+					// The flushing operation needs to update s.imm. Otherwise, we have a deadlock.
+					// TODO: Think about how to do this more cleanly, maybe without any locks.
+				}
+				return false
+			}()
+			if pushedFlushTask {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	db.flushChan <- flushTask{nil, valuePointer{}} // Tell flusher to quit.
+
+	db.closers.memtable.Wait()
+	db.elog.Printf("Memtable flushed")
+
+	db.closers.compactors.SignalAndWait()
+	db.elog.Printf("Compaction finished")
+
+	if lcErr := db.lc.close(); err == nil {
+		err = errors.Wrap(lcErr, "DB.Close")
+	}
+	db.elog.Printf("Waiting for closer")
+	db.closers.updateSize.SignalAndWait()
+
+	db.elog.Finish()
+
+	if guardErr := db.dirLockGuard.release(); err == nil {
+		err = errors.Wrap(guardErr, "DB.Close")
+	}
+	if db.valueDirGuard != nil {
+		if guardErr := db.valueDirGuard.release(); err == nil {
+			err = errors.Wrap(guardErr, "DB.Close")
+		}
+	}
+	if manifestErr := db.manifest.close(); err == nil {
+		err = errors.Wrap(manifestErr, "DB.Close")
+	}
+
+	// Fsync directories to ensure that lock file, and any other removed files whose directory
+	// we haven't specifically fsynced, are guaranteed to have their directory entry removal
+	// persisted to disk.
+	if syncErr := syncDir(db.opt.Dir); err == nil {
+		err = errors.Wrap(syncErr, "DB.Close")
+	}
+	if syncErr := syncDir(db.opt.ValueDir); err == nil {
+		err = errors.Wrap(syncErr, "DB.Close")
+	}
+
+	return err
 
 }
 
@@ -279,8 +438,276 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 	return db.lc.get(key) // 再从sst中查找
 }
 
+// 更新DB对象中的最新value
+func (db *DB) updateOffset(ptrs []valuePointer) {
+	var ptr valuePointer
+	for i := len(ptrs) - 1; i >= 0; i-- {
+		p := ptrs[i]
+		if !ptr.IsZero() {
+			ptr = p
+			break
+		}
+	}
+	if ptr.IsZero() {
+		return
+	}
+	db.Lock()
+	defer db.Unlock()
+	y.AssertTrue(!ptr.Less(db.vptr))
+	db.vptr = ptr
+}
+
+var requestPool = sync.Pool{
+	New: func() interface{} {
+		return new(request)
+	},
+}
+
+func (db *DB) shouldWriteValueToLSM(e entry) bool {
+	return len(e.Value) < db.opt.ValueThreshold
+}
+
+// 将 request 写到 memtable 中
+func (db *DB) writeToLSM(b *request) error {
+	if len(b.Ptrs) != len(b.Entries) {
+		return errors.Errorf("Ptrs and Entries don't match: %+v", b)
+	}
+
+	for i, entry := range b.Entries {
+		if entry.meta&bitFinTxn != 0 {
+			continue
+		}
+		if db.shouldWriteValueToLSM(*entry) {
+			db.mt.Put(entry.Key,
+				y.ValueStruct{
+					Value:     entry.Value,
+					Meta:      entry.meta,
+					UserMeta:  entry.UserMeta,
+					ExpiresAt: entry.ExpiresAt,
+				})
+		} else {
+			var offsetBuf [vptrSize]byte
+			db.mt.Put(entry.Key,
+				y.ValueStruct{
+					Value:     b.Ptrs[i].Encode(offsetBuf[:]), // 记录的是一个value的偏移
+					Meta:      entry.meta | bitValuePointer,
+					UserMeta:  entry.UserMeta,
+					ExpiresAt: entry.ExpiresAt,
+				})
+		}
+	}
+	return nil
+}
+
+func (db *DB) writeRequests(reqs []*request) error {
+	if len(reqs) == 0 {
+		return nil
+	}
+
+	done := func(err error) {
+		for _, r := range reqs {
+			r.Err = err
+			r.Wg.Done()
+		}
+	}
+
+	db.elog.Printf("writeRequests called. Writing to value log")
+
+	// 将 reqs 写到 vlog 的日志文件中 用来从崩溃中恢复
+	err := db.vlog.write(reqs)
+	if err != nil {
+		done(err)
+		return err
+	}
+
+	// 向memtable写入数据
+	db.elog.Printf("Writing to memtable")
+	var count int
+	for _, b := range reqs {
+		if len(b.Entries) == 0 {
+			continue
+		}
+		count += len(b.Entries)
+		for err := db.ensureRoomForWrite(); err != nil; err = db.ensureRoomForWrite() {
+			db.elog.Printf("Making room for writes")
+			// We need to poll a bit because both hasRoomForWrite and the flusher need access to s.imm.
+			// When flushChan is full and you are blocked there, and the flusher is trying to update s.imm,
+			// you will get a deadlock.
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err != nil {
+			done(err)
+			return errors.Wrap(err, "writeRequests")
+		}
+		if err := db.writeToLSM(b); err != nil {
+			done(err)
+			return errors.Wrap(err, "writeRequests")
+		}
+		db.updateOffset(b.Ptrs)
+	}
+	done(nil)
+	db.elog.Printf("%d entries written", count)
+	return nil
+}
+
+func (db *DB) sendToWriteCh(entries []*entry) (*request, error) {
+	var count, size int64
+	for _, e := range entries {
+		size += int64(db.opt.estimateSize(e))
+		count++
+	}
+	if count >= db.opt.maxBatchCount || size >= db.opt.maxBatchSize {
+		return nil, ErrTxnTooBig
+	}
+
+	req := requestPool.Get().(*request)
+	req.Entries = entries
+	req.Wg = sync.WaitGroup{}
+	req.Wg.Add(1)
+	db.writeCh <- req
+	y.NumPuts.Add(int64(len(entries)))
+
+	return req, nil
+}
+
+func (db *DB) doWrites(lc *y.Closer) {
+	defer lc.Done()
+	pendingCh := make(chan struct{}, 1)
+
+	writeRequests := func(reqs []*request) {
+		if err := db.writeRequests(reqs); err != nil {
+			log.Printf("ERROR in lsmdb::writeRequests: %v", err)
+		}
+		<-pendingCh
+	}
+
+	reqLen := new(expvar.Int)
+	y.PendingWrites.Set(db.opt.Dir, reqLen)
+
+	reqs := make([]*request, 0, 10)
+	for {
+		var r *request
+		select {
+		case r = <-db.writeCh:
+			log.Println("TEST", r)
+		case <-lc.HasBeenClosed():
+			goto closedCase
+		}
+
+		for {
+			reqs = append(reqs, r)
+			reqLen.Set(int64(len(reqs)))
+
+			if len(reqs) >= 3*kvWriteChCapacity {
+				pendingCh <- struct{}{} // blocking
+				goto writeCase
+			}
+
+			select {
+			// Either push to pending, or continue to pick from writeCh.
+			case r = <-db.writeCh:
+			case pendingCh <- struct{}{}:
+				goto writeCase
+			case <-lc.HasBeenClosed():
+				goto closedCase
+			}
+
+		}
+
+	closedCase:
+		close(db.writeCh)
+		for r := range db.writeCh { // Flush the channel
+			reqs = append(reqs, r)
+		}
+
+		pendingCh <- struct{}{}
+		writeRequests(reqs)
+		return
+
+	writeCase:
+		go writeRequests(reqs)
+		reqs = make([]*request, 0, 10)
+		reqLen.Set(0)
+	}
+}
+
+func (db *DB) batchSet(entries []*entry) error {
+	req, err := db.sendToWriteCh(entries)
+	if err != nil {
+		return err
+	}
+
+	req.Wg.Wait()
+	req.Entries = nil
+	err = req.Err
+	requestPool.Put(req)
+	return err
+}
+
+func (db *DB) batchSetAsync(entries []*entry, f func(error)) error {
+	req, err := db.sendToWriteCh(entries)
+	if err != nil {
+		return err
+	}
+	go func() {
+		req.Wg.Wait()
+		err := req.Err
+		req.Entries = nil
+		requestPool.Put(req)
+		// Write is complete. Let's call the callback function now.
+		f(err)
+	}()
+	return nil
+}
+
+var errNoRoom = errors.New("No room for write")
+
+func (db *DB) ensureRoomForWrite() error {
+	var err error
+	db.Lock()
+	defer db.Unlock()
+	if db.mt.MemSize() < db.opt.MaxTableSize {
+		return nil
+	}
+
+	// 当前 mmt 的大小已经超过限制 需要创建新的 mmt 并将现在的mmt设置为只读的 immt
+	y.AssertTrue(db.mt != nil) // A nil mt indicates that DB is being closed.
+	select {
+	case db.flushChan <- flushTask{db.mt, db.vptr}:
+		err = db.vlog.sync()
+		if err != nil {
+			return err
+		}
+		// 将当前的 memtable 设置为 immt 并创建新的 mmt
+		db.elog.Printf("Flushing memtable, mt.size=%d size of flushChan: %d\n", db.mt.MemSize(), len(db.flushChan))
+		// We manage to push this task. Let's modify imm.
+		db.imm = append(db.imm, db.mt)
+		db.mt = skl.NewSkiplist(arenaSize(db.opt))
+		// New memtable is empty. We certainly have room.
+		return nil
+	default:
+		return errNoRoom
+	}
+}
+
 func arenaSize(opt Options) int64 {
 	return opt.MaxTableSize + opt.maxBatchSize + opt.maxBatchCount*int64(skl.MaxNodeSize)
+}
+
+func writeLevel0Table(s *skl.Skiplist, f *os.File) error {
+	iter := s.NewIterator()
+	defer iter.Close()
+
+	b := table.NewTableBuilder()
+	defer b.Close()
+
+	for iter.SeekToFirst(); iter.Valid(); iter.Next() {
+		if err := b.Add(iter.Key(), iter.Value()); err != nil {
+			return err
+		}
+	}
+	_, err := f.Write(b.Finish()) // 向Builder中添加了key and value 后 Finish() 会将他们添加到 Bloom Filter
+	return err
 }
 
 type flushTask struct {
@@ -289,7 +716,7 @@ type flushTask struct {
 }
 
 // 刷新Memtable的任务
-func (db *DB) flushMemtabel(lc *y.Closer) error {
+func (db *DB) flushMemtable(lc *y.Closer) error {
 	defer lc.Done()
 
 	for ft := range db.flushChan {
@@ -324,15 +751,18 @@ func (db *DB) flushMemtabel(lc *y.Closer) error {
 		dirSyncErr := <-dirSyncCh // 这里阻塞
 
 		if err != nil {
-
+			db.elog.Errorf("ERROR while writing to level 0: %v", err)
+			return err
 		}
 		if dirSyncErr != nil {
-
+			db.elog.Errorf("ERROR while syncing level directory: %v", dirSyncErr)
+			return err
 		}
 
 		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode)
 		if err != nil {
-
+			db.elog.Printf("ERROR while opening table: %v", err)
+			return err
 		}
 		// We own a ref on tbl.
 		err = db.lc.addLevel0Table(tbl) // This will incrRef (if we don't error, sure)
@@ -354,7 +784,7 @@ func (db *DB) flushMemtabel(lc *y.Closer) error {
 func exists(path string) (bool, error) {
 	_, err := os.Stat(path)
 	if err == nil {
-		return false, nil
+		return true, nil
 	}
 	if os.IsNotExist(err) {
 		return false, nil
@@ -413,11 +843,130 @@ func (db *DB) updateSize(lc *y.Closer) {
 
 // PurgeVersionsBelow will delete all versions of a key below the specified version
 // purge 清理 净化
-func (db *DB) PurgeVersionsBelow(key []byte, ts uint64) error {}
+func (db *DB) PurgeVersionsBelow(key []byte, ts uint64) error {
+	txn := db.NewTransaction(false)
+	defer txn.Discard()
+	return db.purgeVersionsBelow(txn, key, ts)
+}
 
-func (db *DB) purgeVersionBelow(txn *Txn, key []byte, ts uint64) error {}
+func (db *DB) purgeVersionsBelow(txn *Txn, key []byte, ts uint64) error {
+	opts := DefaultIteratorOptions
+	opts.AllVersions = true
+	opts.PrefetchValues = false
+	it := txn.NewIterator(opts)
+
+	var entries []*entry
+
+	for it.Seek(key); it.ValidForPrefix(key); it.Next() {
+		item := it.Item()
+		if !bytes.Equal(key, item.Key()) || item.Version() >= ts {
+			continue
+		}
+
+		// Found an older version. Mark for deletion
+		entries = append(entries,
+			&entry{
+				Key:  y.KeyWithTs(key, item.version),
+				meta: bitDelete,
+			})
+		db.vlog.updateGCStats(item)
+	}
+	return db.batchSet(entries)
+}
 
 // PurgeOlderVersions deletes older versions of all keys.
-func (db *DB) PurgeOlderVersions() error {}
+func (db *DB) PurgeOlderVersions() error {
+	return db.View(func(txn *Txn) error {
+		opts := DefaultIteratorOptions
+		opts.AllVersions = true
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
 
-func (db *DB) RunValueLogGC(discardRatio float64) error {}
+		var entries []*entry
+		var lastKey []byte
+		var count int
+		var wg sync.WaitGroup
+		errChan := make(chan error, 1)
+
+		// func to check for pending error before sending off a batch for writing
+		batchSetAsyncIfNoErr := func(entries []*entry) error {
+			select {
+			case err := <-errChan:
+				return err
+			default:
+				wg.Add(1)
+				return txn.db.batchSetAsync(entries, func(err error) {
+					defer wg.Done()
+					if err != nil {
+						select {
+						case errChan <- err:
+						default:
+						}
+					}
+				})
+			}
+		}
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			if !bytes.Equal(lastKey, item.Key()) {
+				lastKey = y.Safecopy(lastKey, item.Key())
+				continue
+			}
+			// Found an older version. Mark for deletion
+			entries = append(entries,
+				&entry{
+					Key:  y.KeyWithTs(lastKey, item.version),
+					meta: bitDelete,
+				})
+			db.vlog.updateGCStats(item)
+			count++
+
+			// Batch up 1000 entries at a time and write
+			if count == 1000 {
+				if err := batchSetAsyncIfNoErr(entries); err != nil {
+					return err
+				}
+				count = 0
+				entries = []*entry{}
+			}
+		}
+
+		// Write last batch pending deletes
+		if count > 0 {
+			if err := batchSetAsyncIfNoErr(entries); err != nil {
+				return err
+			}
+		}
+
+		wg.Wait()
+
+		select {
+		case err := <-errChan:
+			return err
+		default:
+			return nil
+		}
+	})
+}
+
+func (db *DB) RunValueLogGC(discardRatio float64) error {
+	if discardRatio >= 1.0 || discardRatio <= 0.0 {
+		return ErrInvalidRequest
+	}
+
+	// Find head on disk
+	headKey := y.KeyWithTs(head, math.MaxUint64)
+	val, err := db.lc.get(headKey)
+	if err != nil {
+		return errors.Wrap(err, "Retrieving head from on-disk LSM")
+	}
+
+	var head valuePointer
+	if len(val.Value) > 0 {
+		head.Decode(val.Value)
+	}
+
+	// Pick a log file and run GC
+	return db.vlog.runGC(discardRatio, head)
+}

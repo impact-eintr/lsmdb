@@ -1,7 +1,6 @@
 package skl
 
 import (
-	"log"
 	"math"
 	"math/rand"
 	"sync/atomic"
@@ -264,7 +263,7 @@ func (s *Skiplist) Put(key []byte, v y.ValueStruct) {
 		}
 		listHeight = s.getHeight()
 	}
-	log.Println("重新建立索引", height, atomic.LoadInt32(&s.height))
+	//log.Println("重新建立索引", height, atomic.LoadInt32(&s.height))
 
 	// 我们总是从基础级别和向上插入。
 	// 在基础级别添加节点后，我们无法在上面的级别创建节点，因为它会发现基础级别中的节点

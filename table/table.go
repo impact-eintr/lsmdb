@@ -125,6 +125,7 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error)
 		return nil, y.Wrap(err)
 	}
 
+	// 设置整个 Table 的 最大值/最小值
 	it := t.NewIterator(false)
 	defer it.Close()
 	it.Rewind()
@@ -170,6 +171,8 @@ func (t *Table) readNoFail(off int, sz int) []byte {
 }
 
 // 构建索引
+// 先获取所有块 的索引数组 blockIndex
+// 开启64个 goroutine 通过读取 blockIndex 中的偏移 并行读取文件内容 最终获取到文件中所有的 key
 func (t *Table) readIndex() error {
 	readPos := t.tableSize
 

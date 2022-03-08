@@ -49,7 +49,7 @@ var (
 
 	// ErrRejected is returned if a value log GC is called either while another GC is running, or
 	// after DB::Close has been called.
-	ErrRejected = errors.New("Value log GC request rejected")
+	ErrRejected = errors.New("Value log GC request rejected") // reject: 拒绝
 
 	// ErrInvalidRequest is returned if the user request is invalid.
 	ErrInvalidRequest = errors.New("Invalid request")

@@ -11,6 +11,7 @@ import (
 	"golang.org/x/net/trace"
 )
 
+// 一个有序的 key 范围
 type keyRange struct {
 	left  []byte
 	right []byte

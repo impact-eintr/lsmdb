@@ -303,23 +303,157 @@ func isDeletedOrExpired(vs y.ValueStruct) bool {
 	return vs.ExpiresAt <= uint64(time.Now().Unix())
 }
 
-// Iterator.Next() calls parseItem
+// 向后解析一个Item
 func (it *Iterator) parseItem() bool {
+	mi := it.iitr
+	key := mi.Key()
 
+	setItem := func(item *Item) {
+		if it.item == nil {
+			it.item = item
+		} else {
+			it.data.push(item)
+		}
+	}
+
+	if bytes.HasPrefix(key, lsmdbPrefix) {
+		mi.Next()
+		return false
+	}
+
+	version := y.ParseTs(key)
+	if version > it.readTs {
+		mi.Next()
+		return false
+	}
+
+	if it.opt.AllVersions {
+		if isDeletedOrExpired(mi.Value()) {
+			mi.Next()
+			return false
+		}
+		item := it.newItem()
+		it.fill(item)
+		setItem(item)
+		mi.Next()
+		return true
+	}
+
+	if !it.opt.Reverse {
+		if y.SameKey(it.lastKey, key) {
+			mi.Next()
+			return false
+		}
+		// Only track in forward direction.
+		// We should update lastKey as soon as we find a different key in our snapshot.
+		// Consider keys: a 5, b 7 (del), b 5. When iterating, lastKey = a.
+		// Then we see b 7, which is deleted. If we don't store lastKey = b, we'll then return b 5,
+		// which is wrong. Therefore, update lastKey here.
+		it.lastKey = y.Safecopy(it.lastKey, mi.Key())
+	}
+
+FILL:
+	// If deleted, advance and return.
+	if isDeletedOrExpired(mi.Value()) {
+		mi.Next()
+		return false
+	}
+
+	item := it.newItem()
+	it.fill(item)
+	// fill item based on current cursor position. All Next calls have returned, so reaching here
+	// means no Next was called.
+
+	mi.Next()                           // Advance but no fill item yet.
+	if !it.opt.Reverse || !mi.Valid() { // Forward direction, or invalid.
+		setItem(item)
+		return true
+	}
+
+	// Reverse direction.
+	nextTs := y.ParseTs(mi.Key())
+	mik := y.ParseKey(mi.Key())
+	if nextTs <= it.readTs && bytes.Equal(mik, item.key) {
+		// This is a valid potential candidate.
+		goto FILL
+	}
+	// Ignore the next candidate. Return the current one.
+	setItem(item)
+	return true
 }
 
 func (it *Iterator) fill(item *Item) {
+	vs := it.iitr.Value()
+	item.meta = vs.Meta
+	item.userMeta = vs.UserMeta
+	item.expiresAt = vs.ExpiresAt
 
+	item.version = y.ParseTs(it.iitr.Key())
+	item.key = y.Safecopy(item.key, y.ParseKey(it.iitr.Key()))
+
+	item.vptr = y.Safecopy(item.vptr, vs.Value)
+	item.val = nil
+	if it.opt.PrefetchValues {
+		item.wg.Add(1)
+		go func() {
+			// FIXME we are not handling errors here.
+			item.prefetchValue()
+			item.wg.Done()
+		}()
+	}
 }
 
 func (it *Iterator) prefetch() {
+	prefetchSize := 2
+	if it.opt.PrefetchValues && it.opt.PrefetchSize > 1 {
+		prefetchSize = it.opt.PrefetchSize
+	}
 
+	i := it.iitr
+	var count int
+	it.item = nil
+	for i.Valid() {
+		if !it.parseItem() {
+			continue
+		}
+		count++
+		if count == prefetchSize {
+			break
+		}
+	}
 }
 
 func (it *Iterator) Seek(key []byte) {
+	for i := it.data.pop(); i != nil; i = it.data.pop() {
+		i.wg.Wait()
+		it.waste.push(i)
+	}
 
+	it.lastKey = it.lastKey[:0]
+	if len(key) == 0 {
+		it.iitr.Rewind()
+		it.prefetch()
+		return
+	}
+
+	if !it.opt.Reverse {
+		key = y.KeyWithTs(key, it.txn.readTs)
+	} else {
+		key = y.KeyWithTs(key, 0)
+	}
+	it.iitr.Seek(key)
+	it.prefetch()
 }
 
 func (it *Iterator) Rewind() {
+	i := it.data.pop()
+	for i != nil {
+		i.wg.Wait() // Just cleaner to wait before pushing. No ref counting needed.
+		it.waste.push(i)
+		i = it.data.pop()
+	}
 
+	it.lastKey = it.lastKey[:0]
+	it.iitr.Rewind()
+	it.prefetch()
 }
