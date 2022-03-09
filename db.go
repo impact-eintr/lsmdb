@@ -153,7 +153,11 @@ func Open(opt Options) (db *DB, err error) {
 			return nil, y.Wrapf(err, "Invalid Dir: %q", path)
 		}
 		if !dirExists {
-			return nil, ErrInvalidDir
+			// Try to create the directory
+			err = os.Mkdir(path, 0700)
+			if err != nil {
+				return nil, y.Wrapf(err, "Error Creating Dir: %q", path)
+			}
 		}
 	}
 	absDir, err := filepath.Abs(opt.Dir)
@@ -558,7 +562,7 @@ func (db *DB) writeRequests(reqs []*request) error {
 func (db *DB) sendToWriteCh(entries []*entry) (*request, error) {
 	var count, size int64
 	for _, e := range entries {
-		size += int64(db.opt.estimateSize(e))
+		size += int64(e.estimateSize(db.opt.ValueThreshold))
 		count++
 	}
 	if count >= db.opt.maxBatchCount || size >= db.opt.maxBatchSize {

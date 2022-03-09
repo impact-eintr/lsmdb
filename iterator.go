@@ -71,6 +71,18 @@ func (item *Item) Value() ([]byte, error) {
 	return buf, err
 }
 
+// This function is useful in long running iterate/update transactions to avoid a write deadlock.
+// See Github issue: https://github.com/dgraph-io/badger/issues/315
+func (item *Item) ValueCopy(dst []byte) ([]byte, error) {
+	item.wg.Wait()
+	if item.status == prefetched {
+		return y.Safecopy(dst, item.val), item.err
+	}
+	buf, cb, err := item.yieldItemValue()
+	defer runCallback(cb)
+	return y.Safecopy(dst, buf), err
+}
+
 func (item *Item) hasValue() bool {
 	if item.meta == 0 && item.vptr == nil {
 		// key not found

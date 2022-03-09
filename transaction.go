@@ -56,7 +56,12 @@ func (o *oracle) decrRef() {
 	if count := atomic.AddInt64(&o.refCount, -1); count == 0 {
 		// Clear out pendingCommits maps to release memory.
 		o.Lock()
-		y.AssertTrue(len(o.commitMark) == 0)
+		// There could be race here, so check again.
+		// Checking commitMark is safe since it is protected by mutex.
+		if len(o.commitMark) > 0 {
+			o.Unlock()
+			return
+		}
 		y.AssertTrue(len(o.pendingCommits) == 0)
 		if len(o.commits) >= 1000 { // If the map is still small, let it slide.
 			o.commits = make(map[uint64]uint64)
@@ -177,7 +182,7 @@ type Txn struct {
 
 func (txn *Txn) checkSize(e *entry) error {
 	count := txn.count + 1
-	size := txn.size + int64(txn.db.opt.estimateSize(e)) + 10 // Extra bytes for version in key.
+	size := txn.size + int64(e.estimateSize(txn.db.opt.ValueThreshold)) + 10 // Extra bytes for version in key.
 	if count >= txn.db.opt.maxBatchCount || size >= txn.db.opt.maxBatchSize {
 		return ErrTxnTooBig
 	}
@@ -280,6 +285,12 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 	item = new(Item)
 	if txn.update {
 		if e, has := txn.pendingWrites[string(key)]; has && bytes.Equal(key, e.Key) {
+			if e.meta&bitDelete > 0 {
+				return nil, ErrKeyNotFound
+			}
+			if e.ExpiresAt > 0 && e.ExpiresAt <= uint64(time.Now().Unix()) {
+				return nil, ErrKeyNotFound
+			}
 			// Fulfill from cache.
 			item.meta = e.meta
 			item.val = e.Value
@@ -368,7 +379,6 @@ func (txn *Txn) Commit(callback func(error)) error {
 	if commitTs == 0 {
 		return ErrConflict
 	}
-	defer state.doneCommit(commitTs)
 
 	entries := make([]*entry, 0, len(txn.pendingWrites)+1)
 	for _, e := range txn.pendingWrites {
@@ -391,9 +401,13 @@ func (txn *Txn) Commit(callback func(error)) error {
 
 		// TODO: What if some of the txns successfully make it to value log, but others fail.
 		// Nothing gets updated to LSM, until a restart happens.
+		defer state.doneCommit(commitTs)
 		return txn.db.batchSet(entries)
 	}
-	return txn.db.batchSetAsync(entries, callback)
+	return txn.db.batchSetAsync(entries, func(err error) {
+		state.doneCommit(commitTs)
+		callback(err)
+	})
 }
 
 func (db *DB) NewTransaction(update bool) *Txn {
