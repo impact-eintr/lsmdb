@@ -10,11 +10,11 @@ import (
 	"github.com/impact-eintr/lsmdb/y"
 )
 
-func writeTo(entry *protos.KVPair, w io.Writer) error {
-	if err := binary.Write(w, binary.LittleEndian, uint64(entry.Size())); err != nil {
+func writeTo(Entry *protos.KVPair, w io.Writer) error {
+	if err := binary.Write(w, binary.LittleEndian, uint64(Entry.Size())); err != nil {
 		return err
 	}
-	buf, err := entry.Marshal()
+	buf, err := Entry.Marshal()
 	if err != nil {
 		return err
 	}
@@ -39,7 +39,7 @@ func (db *DB) Backup(w io.Writer, since uint64) (uint64, error) {
 				return err
 			}
 
-			entry := &protos.KVPair{
+			Entry := &protos.KVPair{
 				Key:       y.Copy(item.Key()),
 				Value:     y.Copy(val),
 				UserMeta:  []byte{item.UserMeta()},
@@ -48,7 +48,7 @@ func (db *DB) Backup(w io.Writer, since uint64) (uint64, error) {
 			}
 
 			// Write entries to disk
-			if err := writeTo(entry, w); err != nil {
+			if err := writeTo(Entry, w); err != nil {
 				return err
 			}
 		}
@@ -61,12 +61,12 @@ func (db *DB) Backup(w io.Writer, since uint64) (uint64, error) {
 func (db *DB) Load(r io.Reader) error {
 	br := bufio.NewReaderSize(r, 16<<10)
 	unmarshalBuf := make([]byte, 1<<10)
-	var entries []*entry
+	var entries []*Entry
 	var wg sync.WaitGroup
 	errChan := make(chan error, 1)
 
 	// NOTE 这个写法太炫了
-	batchSetAsyncIfNoErr := func(entries []*entry) error {
+	batchSetAsyncIfNoErr := func(entries []*Entry) error {
 		select {
 		case err := <-errChan:
 			return err
@@ -104,7 +104,7 @@ func (db *DB) Load(r io.Reader) error {
 		if err = e.Unmarshal(unmarshalBuf[:sz]); err != nil {
 			return err
 		}
-		entries = append(entries, &entry{
+		entries = append(entries, &Entry{
 			Key:       y.KeyWithTs(e.Key, e.Version),
 			Value:     e.Value,
 			UserMeta:  e.UserMeta[0],

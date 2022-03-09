@@ -170,7 +170,7 @@ type Txn struct {
 	reads  []uint64 // contains fingerprints of keys read.
 	writes []uint64 // contains fingerprints of keys written.
 
-	pendingWrites map[string]*entry // cache stores any writes done by txn.
+	pendingWrites map[string]*Entry // cache stores any writes done by txn.
 
 	db        *DB
 	callbacks []func()
@@ -180,7 +180,7 @@ type Txn struct {
 	count int64
 }
 
-func (txn *Txn) checkSize(e *entry) error {
+func (txn *Txn) checkSize(e *Entry) error {
 	count := txn.count + 1
 	size := txn.size + int64(e.estimateSize(txn.db.opt.ValueThreshold)) + 10 // Extra bytes for version in key.
 	if count >= txn.db.opt.maxBatchCount || size >= txn.db.opt.maxBatchSize {
@@ -195,7 +195,7 @@ func (txn *Txn) checkSize(e *entry) error {
 // It will return ErrReadOnlyTxn if update flag was set to false when creating the
 // transaction.
 func (txn *Txn) Set(key, val []byte) error {
-	e := &entry{
+	e := &Entry{
 		Key:   key,
 		Value: val,
 	}
@@ -207,7 +207,7 @@ func (txn *Txn) Set(key, val []byte) error {
 // interpret the value or store other contextual bits corresponding to the
 // key-value pair.
 func (txn *Txn) SetWithMeta(key, val []byte, meta byte) error {
-	e := &entry{Key: key, Value: val, UserMeta: meta}
+	e := &Entry{Key: key, Value: val, UserMeta: meta}
 	return txn.setEntry(e)
 }
 
@@ -216,11 +216,11 @@ func (txn *Txn) SetWithMeta(key, val []byte, meta byte) error {
 // the time has elapsed , and be eligible for garbage collection.
 func (txn *Txn) SetWithTTL(key, val []byte, dur time.Duration) error {
 	expire := time.Now().Add(dur).Unix()
-	e := &entry{Key: key, Value: val, ExpiresAt: uint64(expire)}
+	e := &Entry{Key: key, Value: val, ExpiresAt: uint64(expire)}
 	return txn.setEntry(e)
 }
 
-func (txn *Txn) setEntry(e *entry) error {
+func (txn *Txn) setEntry(e *Entry) error {
 	switch {
 	case !txn.update:
 		return ErrReadOnlyTxn
@@ -258,7 +258,7 @@ func (txn *Txn) Delete(key []byte) error {
 		return exceedsMaxKeySizeError(key)
 	}
 
-	e := &entry{
+	e := &Entry{
 		Key:  key,
 		meta: bitDelete,
 	}
@@ -380,7 +380,7 @@ func (txn *Txn) Commit(callback func(error)) error {
 		return ErrConflict
 	}
 
-	entries := make([]*entry, 0, len(txn.pendingWrites)+1)
+	entries := make([]*Entry, 0, len(txn.pendingWrites)+1)
 	for _, e := range txn.pendingWrites {
 		//log.Println("after commit set ", e.Value)
 		// Suffix the keys with commit ts, so the key versions are sorted in
@@ -389,7 +389,7 @@ func (txn *Txn) Commit(callback func(error)) error {
 		e.meta |= bitTxn
 		entries = append(entries, e)
 	}
-	e := &entry{
+	e := &Entry{
 		Key:   y.KeyWithTs(txnKey, commitTs),
 		Value: []byte(strconv.FormatUint(commitTs, 10)),
 		meta:  bitFinTxn,
@@ -415,11 +415,11 @@ func (db *DB) NewTransaction(update bool) *Txn {
 		update: update,
 		db:     db,
 		readTs: db.orc.readTs(),
-		count:  1,                       // One extra entry for BitFin.
-		size:   int64(len(txnKey) + 10), // Some buffer for the extra entry.
+		count:  1,                       // One extra Entry for BitFin.
+		size:   int64(len(txnKey) + 10), // Some buffer for the extra Entry.
 	}
 	if update {
-		txn.pendingWrites = make(map[string]*entry)
+		txn.pendingWrites = make(map[string]*Entry)
 		txn.db.orc.addRef()
 	}
 	return txn

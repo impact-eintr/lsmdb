@@ -381,23 +381,23 @@ func (s *Iterator) Prev() {
 	s.n, _ = s.list.findNear(s.Key(), true, false) // find <. No equality allowed.
 }
 
-// Seek advances to the first entry with a key >= target.
+// Seek advances to the first Entry with a key >= target.
 func (s *Iterator) Seek(target []byte) {
 	s.n, _ = s.list.findNear(target, false, true) // find >=.
 }
 
-// SeekForPrev finds an entry with key <= target.
+// SeekForPrev finds an Entry with key <= target.
 func (s *Iterator) SeekForPrev(target []byte) {
 	s.n, _ = s.list.findNear(target, true, true) // find <=.
 }
 
-// SeekToFirst seeks position at the first entry in list.
+// SeekToFirst seeks position at the first Entry in list.
 // Final state of iterator is Valid() iff list is not empty.
 func (s *Iterator) SeekToFirst() {
 	s.n = s.list.getNext(s.list.head, 0)
 }
 
-// SeekToLast seeks position at the last entry in list.
+// SeekToLast seeks position at the last Entry in list.
 // Final state of iterator is Valid() iff list is not empty.
 func (s *Iterator) SeekToLast() {
 	s.n = s.list.findLast()

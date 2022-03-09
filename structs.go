@@ -75,7 +75,7 @@ func (h *header) Decode(buf []byte) {
 	h.userMeta = buf[17]
 }
 
-type entry struct {
+type Entry struct {
 	Key       []byte
 	Value     []byte
 	UserMeta  byte
@@ -88,7 +88,7 @@ type entry struct {
 
 // 如果存的值小于threshold 直接返回key+value+meta的大小 否则返回key+valuePointer+meta的大小
 // estimate: 估计
-func (e *entry) estimateSize(threshold int) int {
+func (e *Entry) estimateSize(threshold int) int {
 	if len(e.Value) < threshold {
 		return len(e.Key) + len(e.Value) + 2 // Meta, UserMeta
 	}
@@ -96,7 +96,7 @@ func (e *entry) estimateSize(threshold int) int {
 }
 
 // 解码 Entry
-func encodeEntry(e *entry, buf *bytes.Buffer) (int, error) {
+func encodeEntry(e *Entry, buf *bytes.Buffer) (int, error) {
 	// 初始化header
 	h := header{
 		klen:      uint32(len(e.Key)),
@@ -128,7 +128,7 @@ func encodeEntry(e *entry, buf *bytes.Buffer) (int, error) {
 	return len(headerEnc) + len(e.Key) + len(e.Value) + len(crcBuf), nil
 }
 
-func (e entry) print(prefix string) {
+func (e Entry) print(prefix string) {
 	fmt.Printf("%s Key: %s Meta: %d UserMeta: %d Offset: %d len(val)=%d",
 		prefix, e.Key, e.meta, e.UserMeta, e.offset, len(e.Value))
 }

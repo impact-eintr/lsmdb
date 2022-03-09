@@ -226,7 +226,7 @@ func TestExists(t *testing.T) {
 	}
 	defer kv.Close()
 
-	// populate with one entry
+	// populate with one Entry
 	txnSet(t, kv, []byte("key1"), []byte("val1"), 0x00)
 
 	tt := []struct {

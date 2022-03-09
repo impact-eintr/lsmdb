@@ -121,7 +121,7 @@ func helpOpenOrCreateManifestFile(dir string, deletionsThreshold int) (ret *mani
 		return nil, Manifest{}, err
 	}
 
-	// Truncate file so we don't have a half-written entry at the end.
+	// Truncate file so we don't have a half-written Entry at the end.
 	if err := fp.Truncate(truncOffset); err != nil {
 		_ = fp.Close()
 		return nil, Manifest{}, err
