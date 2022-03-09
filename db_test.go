@@ -17,20 +17,8 @@
 package lsmdb
 
 import (
-	"bytes"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"math"
-	"math/rand"
-	"os"
-	"regexp"
-	"sort"
-	"sync"
 	"testing"
-	"time"
 
-	"github.com/impact-eintr/lsmdb/y"
 	"github.com/stretchr/testify/require"
 )
 
@@ -67,6 +55,7 @@ func txnDelete(t *testing.T, kv *DB, key []byte) {
 	require.NoError(t, txn.Commit(nil))
 }
 
+/*
 func TestWrite(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
@@ -75,7 +64,6 @@ func TestWrite(t *testing.T) {
 	require.NoError(t, err)
 	defer kv.Close()
 
-	log.Println(kv)
 	for i := 0; i < 100; i++ {
 		txnSet(t, kv, []byte(fmt.Sprintf("key%d", i)), []byte(fmt.Sprintf("val%d", i)), 0x00)
 	}
@@ -187,7 +175,7 @@ func TestGet(t *testing.T) {
 	defer kv.Close()
 	txnSet(t, kv, []byte("key1"), []byte("val1"), 0x08)
 
-	txn := kv.NewTransaction(false)
+	txn := kv.NewTransaction(false) // 开启一个只读事务
 	item, err := txn.Get([]byte("key1"))
 	require.NoError(t, err)
 	require.EqualValues(t, "val1", getItemValue(t, item))
@@ -326,6 +314,7 @@ func TestGetMore(t *testing.T) {
 	//	n := 500000
 	n := 10000
 	m := 49 // Increasing would cause ErrTxnTooBig
+
 	for i := 0; i < n; i += m {
 		txn := kv.NewTransaction(true)
 		for j := i; j < i+m && j < n; j++ {
@@ -334,16 +323,18 @@ func TestGetMore(t *testing.T) {
 		require.NoError(t, txn.Commit(nil))
 	}
 	require.NoError(t, kv.validate())
+	log.Println("SET End!!!")
 
 	for i := 0; i < n; i++ {
 		txn := kv.NewTransaction(false)
 		item, err := txn.Get(data(i))
 		if err != nil {
-			t.Error(err)
+			t.Error(i, err)
 		}
 		require.EqualValues(t, string(data(i)), string(getItemValue(t, item)))
 		txn.Discard()
 	}
+	log.Println("GET End!!!")
 
 	// Overwrite
 	for i := 0; i < n; i += m {
@@ -1168,3 +1159,4 @@ func ExampleTxn_NewIterator() {
 	// Output:
 	// Counted 1000 elements
 }
+*/
