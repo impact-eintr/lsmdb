@@ -160,7 +160,7 @@ func TestOverlappingKeyRangeError(t *testing.T) {
 	dir, err := ioutil.TempDir("", "badger")
 	require.NoError(t, err)
 	defer os.RemoveAll(dir)
-	opt := DefaultOptions
+	opt := DefaultOptions(dir)
 	opt.Dir = dir
 	opt.ValueDir = dir
 	kv, err := Open(opt)

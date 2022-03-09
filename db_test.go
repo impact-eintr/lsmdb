@@ -23,7 +23,7 @@ import (
 )
 
 func getTestOptions(dir string) Options {
-	opt := DefaultOptions
+	opt := DefaultOptions(dir)
 	opt.MaxTableSize = 1 << 15 // Force more compaction.
 	opt.LevelOneSize = 4 << 15 // Force more compaction.
 	opt.Dir = dir

@@ -3,20 +3,20 @@ package main
 import (
 	"fmt"
 
-	badger "github.com/dgraph-io/badger/v3"
+	"github.com/impact-eintr/lsmdb"
 )
 
 func main() {
 
 	// open the DB file
-	db, err := badger.Open(badger.DefaultOptions("/tmp/badger"))
+	db, err := lsmdb.Open(lsmdb.DefaultOptions("/tmp/lsmdb"))
 	if err != nil {
 		panic(err)
 	}
 	defer db.Close()
 
 	// 读写事务
-	err = db.Update(func(txn *badger.Txn) error {
+	err = db.Update(func(txn *lsmdb.Txn) error {
 		txn.Set([]byte("answer"), []byte("42"))
 		txn.Set([]byte("answer_v1"), []byte("43"))
 		txn.Set([]byte("answer_v2"), []byte("44"))
@@ -27,24 +27,26 @@ func main() {
 	})
 
 	// 只读事务
-	err = db.View(func(txn *badger.Txn) error {
+	err = db.View(func(txn *lsmdb.Txn) error {
 		txn.Get([]byte("answer_v1"))
 		return nil
 	})
 
 	// 遍历keys
-	err = db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
+	err = db.View(func(txn *lsmdb.Txn) error {
+		opts := lsmdb.DefaultIteratorOptions
 		opts.PrefetchSize = 10
 		it := txn.NewIterator(opts)
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
 			k := item.Key()
-			err := item.Value(func(v []byte) error {
-				fmt.Printf("key=%s, value=%s\n", k, v)
-				return nil
-			})
+			//err := item.Value(func(v []byte) error {
+			//	fmt.Printf("key=%s, value=%s\n", k, v)
+			//	return nil
+			//})
+			v, err := item.Value()
+			fmt.Printf("key=%s, value=%s\n", k, v)
 			if err != nil {
 				return err
 			}

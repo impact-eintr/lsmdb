@@ -69,7 +69,7 @@ type Options struct {
 
 // DefaultOptions sets a list of recommended options for good performance.
 // Feel free to modify these to suit your needs.
-var DefaultOptions = Options{
+var defaultOptions = Options{
 	DoNotCompact:        false,
 	LevelOneSize:        256 << 20,
 	LevelSizeMultiplier: 10,
@@ -87,6 +87,12 @@ var DefaultOptions = Options{
 	// MemoryMap to mmap() the value log files
 	ValueLogFileSize: 1 << 30,
 	ValueThreshold:   20,
+}
+
+func DefaultOptions(dir string) Options {
+	defaultOptions.Dir = dir
+	defaultOptions.ValueDir = dir
+	return defaultOptions
 }
 
 func (opt *Options) estimateSize(e *Entry) int {
