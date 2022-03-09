@@ -178,6 +178,7 @@ func (s *levelHandler) close() error {
 }
 
 // getTableForKey acquires a read-lock to access s.tables. It returns a list of tableHandlers.
+// 返回当层的所有 sst 对象
 func (s *levelHandler) getTableForKey(key []byte) ([]*table.Table, func() error) {
 	s.RLock()
 	defer s.RUnlock()
@@ -216,6 +217,7 @@ func (s *levelHandler) getTableForKey(key []byte) ([]*table.Table, func() error)
 // get returns value for a given key or the key after that. If not found, return nil.
 func (s *levelHandler) get(key []byte) (y.ValueStruct, error) {
 	tables, decr := s.getTableForKey(key)
+	//log.Println("在 sst level 中寻找", tables)
 	keyNoTs := y.ParseKey(key)
 
 	for _, th := range tables {

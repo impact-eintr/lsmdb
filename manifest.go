@@ -2,6 +2,7 @@ package lsmdb
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -290,6 +291,9 @@ func ReplayManifestFile(fp *os.File) (ret Manifest, truncOffset int64, err error
 
 	var magicBuf [8]byte
 	if _, err := io.ReadFull(&r, magicBuf[:]); err != nil {
+		return Manifest{}, 0, errBadMagic
+	}
+	if !bytes.Equal(magicBuf[0:4], magicText[:]) {
 		return Manifest{}, 0, errBadMagic
 	}
 	version := binary.BigEndian.Uint32(magicBuf[4:8])

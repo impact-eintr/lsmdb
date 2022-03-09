@@ -26,6 +26,7 @@ type keyOffset struct {
 	len    int
 }
 
+// SST 在内存中的映射
 // Table represents(代表) a loaded table file with the info we have about it
 type Table struct {
 	sync.Mutex
@@ -125,7 +126,7 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error)
 		return nil, y.Wrap(err)
 	}
 
-	// 设置整个 Table 的 最大值/最小值
+	// 设置整个 Table 的 最小值/最大值
 	it := t.NewIterator(false)
 	defer it.Close()
 	it.Rewind()
@@ -134,8 +135,8 @@ func OpenTable(fd *os.File, loadingMode options.FileLoadingMode) (*Table, error)
 	}
 
 	it2 := t.NewIterator(true)
-	defer it.Close()
-	it.Rewind()
+	defer it2.Close()
+	it2.Rewind()
 	if it2.Valid() {
 		t.biggest = it2.Key()
 	}

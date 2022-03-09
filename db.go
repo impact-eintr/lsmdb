@@ -20,9 +20,9 @@ import (
 )
 
 var (
-	lsmdbPrefix = []byte("!lsmdb!")     // Prefix for internal keys used by lsmdb.
-	head        = []byte("!lsmdb!head") // For storing value offset for replay.
-	txnKey      = []byte("!lsmdb!txn")  // For indicating end of entries in txn.
+	lsmdbPrefix = []byte("!wlsmdb!")     // Prefix for internal keys used by wisckey lsmdb.
+	head        = []byte("!wlsmdb!head") // For storing value offset for replay.
+	txnKey      = []byte("!wlsmdb!txn")  // For indicating end of entries in txn.
 )
 
 type closers struct {
@@ -251,7 +251,7 @@ func Open(opt Options) (db *DB, err error) {
 	go db.flushMemtable(db.closers.memtable)
 
 	// vlog初始化
-	if err := db.vlog.Open(db, opt); err != nil {
+	if err = db.vlog.Open(db, opt); err != nil {
 		return nil, err
 	}
 
@@ -428,6 +428,8 @@ func (db *DB) get(key []byte) (y.ValueStruct, error) {
 
 	y.NumGets.Add(1)
 	// 先遍历内存数组
+	//log.Println("db.get(), lenght of tables : ", len(tables))
+	//log.Printf("db.get(), tables[0] : %#v\n", tables[0])
 	for i := 0; i < len(tables); i++ {
 		vs := tables[i].Get(key)
 		y.NumMemtableGets.Add(1)
@@ -443,7 +445,7 @@ func (db *DB) updateOffset(ptrs []valuePointer) {
 	var ptr valuePointer
 	for i := len(ptrs) - 1; i >= 0; i-- {
 		p := ptrs[i]
-		if !ptr.IsZero() {
+		if !p.IsZero() {
 			ptr = p
 			break
 		}
@@ -478,6 +480,7 @@ func (db *DB) writeToLSM(b *request) error {
 			continue
 		}
 		if db.shouldWriteValueToLSM(*entry) {
+			//log.Println("writeToLSM() 写了一个值")
 			db.mt.Put(entry.Key,
 				y.ValueStruct{
 					Value:     entry.Value,
@@ -487,6 +490,7 @@ func (db *DB) writeToLSM(b *request) error {
 				})
 		} else {
 			var offsetBuf [vptrSize]byte
+			//log.Println("writeToLSM() 写了一个指针")
 			db.mt.Put(entry.Key,
 				y.ValueStruct{
 					Value:     b.Ptrs[i].Encode(offsetBuf[:]), // 记录的是一个value的偏移
@@ -507,6 +511,7 @@ func (db *DB) writeRequests(reqs []*request) error {
 	done := func(err error) {
 		for _, r := range reqs {
 			r.Err = err
+			//log.Printf("entry: %s写入日志文件结束 %v", r.Entries[0].Key, r.Err)
 			r.Wg.Done()
 		}
 	}
@@ -589,7 +594,6 @@ func (db *DB) doWrites(lc *y.Closer) {
 		var r *request
 		select {
 		case r = <-db.writeCh:
-			log.Println("TEST", r)
 		case <-lc.HasBeenClosed():
 			goto closedCase
 		}
@@ -715,7 +719,7 @@ type flushTask struct {
 	vptr valuePointer
 }
 
-// 刷新Memtable的任务
+// 刷新Memtable的任务 将 DB.imm 刷到 sst 中
 func (db *DB) flushMemtable(lc *y.Closer) error {
 	defer lc.Done()
 
@@ -759,7 +763,8 @@ func (db *DB) flushMemtable(lc *y.Closer) error {
 			return err
 		}
 
-		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode)
+		tbl, err := table.OpenTable(fd, db.opt.TableLoadingMode) // tbl 是一个 sst 对象
+		//log.Printf("small :%s big:%s\n", tbl.Smallest(), tbl.Biggest())
 		if err != nil {
 			db.elog.Printf("ERROR while opening table: %v", err)
 			return err

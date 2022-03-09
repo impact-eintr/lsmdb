@@ -235,6 +235,7 @@ func (txn *Txn) setEntry(e *entry) error {
 	fp := farm.Fingerprint64(e.Key) // Avoid dealing with byte arrays.
 	txn.writes = append(txn.writes, fp)
 	txn.pendingWrites[string(e.Key)] = e
+	//log.Println("before commit set ", e.Value)
 	return nil
 }
 
@@ -314,6 +315,7 @@ func (txn *Txn) Get(key []byte) (item *Item, rerr error) {
 	item.db = txn.db
 	item.vptr = vs.Value
 	item.txn = txn
+	//log.Println("txn.Get()", item.vptr)
 	return item, nil
 }
 
@@ -370,6 +372,7 @@ func (txn *Txn) Commit(callback func(error)) error {
 
 	entries := make([]*entry, 0, len(txn.pendingWrites)+1)
 	for _, e := range txn.pendingWrites {
+		//log.Println("after commit set ", e.Value)
 		// Suffix the keys with commit ts, so the key versions are sorted in
 		// descending order of commit timestamp.
 		e.Key = y.KeyWithTs(e.Key, commitTs)
@@ -382,6 +385,7 @@ func (txn *Txn) Commit(callback func(error)) error {
 		meta:  bitFinTxn,
 	}
 	entries = append(entries, e) // 将新的写事务添加到待执行任务中
+
 	if callback == nil {
 		// If batchSet failed, LSM would not have been updated. So, no need to rollback anything.
 

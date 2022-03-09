@@ -39,7 +39,7 @@ func (p valuePointer) Encode(b []byte) []byte {
 	return b[:vptrSize]
 }
 
-func (p valuePointer) Decode(b []byte) {
+func (p *valuePointer) Decode(b []byte) {
 	p.Fid = binary.BigEndian.Uint32(b[:4])
 	p.Len = binary.BigEndian.Uint32(b[4:8])
 	p.Offset = binary.BigEndian.Uint32(b[8:12])
@@ -67,7 +67,7 @@ func (h header) Encode(out []byte) {
 	out[17] = h.userMeta
 }
 
-func (h header) Decode(buf []byte) {
+func (h *header) Decode(buf []byte) {
 	h.klen = binary.BigEndian.Uint32(buf[0:4])
 	h.vlen = binary.BigEndian.Uint32(buf[4:8])
 	h.expiresAt = binary.BigEndian.Uint64(buf[8:16])

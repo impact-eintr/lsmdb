@@ -136,7 +136,7 @@ var errStop = errors.New("Stop iteration")
 
 type logEntry func(e entry, vp valuePointer) error
 
-// 令从 offset 开始的 vlog_iterator 向后执行 fn 知道遍历结束或者出错退出
+// 令从 offset 开始的 vlog_iterator 向后执行 fn 直到遍历结束或者出错退出
 func (vlog *valueLog) iterate(lf *logFile, offset uint32, fn logEntry) error {
 	_, err := lf.fd.Seek(int64(offset), io.SeekStart)
 	if err != nil {
@@ -545,9 +545,8 @@ func (vlog *valueLog) Close() error {
 
 	var err error
 	for id, f := range vlog.filesMap {
-		f.lock.Lock() // NOTE: We won’t release the lock.
-		// TODO 测试 这是什么神奇的写法
-		log.Println("TEST!!!")
+		// NOTE 将所有 vlogFileLock 锁上不再释放 防止被修改
+		f.lock.Lock()
 
 		if munmapErr := y.Munmap(f.fmap); munmapErr != nil && err == nil {
 			err = munmapErr
@@ -852,9 +851,11 @@ func (vlog *valueLog) doRunGC(gcThreshold float64, head valuePointer) (err error
 
 	// Update stas before exiting
 	defer func() {
-		vlog.lfDiscardStats.Lock()
-		delete(vlog.lfDiscardStats.m, lf.fid)
-		vlog.lfDiscardStats.Unlock()
+		if err == nil {
+			vlog.lfDiscardStats.Lock()
+			delete(vlog.lfDiscardStats.m, lf.fid)
+			vlog.lfDiscardStats.Unlock()
+		}
 	}()
 
 	type reason struct {

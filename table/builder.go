@@ -146,9 +146,8 @@ func (b *Builder) ReachedCapacity(cap int64) bool {
 func (b *Builder) blockIndex() []byte {
 	// Store the end offset, so we know the length of the final block.
 	b.restarts = append(b.restarts, uint32(b.buf.Len()))
-
 	// Add 4 because we want to write out number of restarts at the end.
-	sz := 4*len(b.restarts) + 4 // 4 是restarts的位置
+	sz := 4*len(b.restarts) + 4
 	out := make([]byte, sz)
 	buf := out
 	for _, r := range b.restarts {
@@ -179,6 +178,7 @@ func (b *Builder) Finish() []byte {
 		}
 		key = key[:kl]
 		y.Check2(b.keyBuf.Read(key))
+		//log.Println("K ", string(key))
 		bf.Add(key) // 向 Bloom Filter 添加当前Key
 	}
 

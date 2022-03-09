@@ -476,7 +476,7 @@ func (s *levelsController) runCompactDef(l int, cd compactDef) (err error) {
 	thisLevel := cd.thisLevel
 	nextLevel := cd.nextLevel
 
-	if thisLevel.level >= 0 && len(cd.bot) == 0 {
+	if thisLevel.level >= 1 && len(cd.bot) == 0 {
 		y.AssertTrue(len(cd.top) == 1)
 		tbl := cd.top[0]
 
@@ -592,6 +592,7 @@ func (s *levelsController) doCompact(p compactionPriority) (bool, error) {
 	return true, nil
 }
 
+// 将一个 sst 对象 添加到 level0 管理器中
 func (s *levelsController) addLevel0Table(t *table.Table) error {
 	err := s.kv.manifest.addChanges([]*protos.ManifestChange{
 		makeTableCreateChange(t.ID(), 0),
