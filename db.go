@@ -645,6 +645,10 @@ func (db *DB) batchSet(entries []*Entry) error {
 		return err
 	}
 
+	//for _, e := range entries {
+	//	log.Println(e.meta&bitDelete, bitDelete)
+	//}
+
 	req.Wg.Wait()
 	req.Entries = nil
 	err = req.Err

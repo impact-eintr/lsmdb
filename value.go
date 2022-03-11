@@ -848,6 +848,7 @@ func (vlog *valueLog) doRunGC(gcThreshold float64, head valuePointer) (err error
 	if lf == nil {
 		return ErrNoRewrite
 	}
+	//log.Printf("准备删除 %v\n", lf.fid)
 
 	// Update stas before exiting
 	defer func() {
@@ -887,6 +888,8 @@ func (vlog *valueLog) doRunGC(gcThreshold float64, head valuePointer) (err error
 		}
 		r.total += esz
 		if r.total > window {
+			//log.Println("统计", r.total, count)
+			//log.Println("准备丢弃: ", r.discard)
 			return errStop
 		}
 		if time.Since(start) > 10*time.Second {
@@ -943,11 +946,15 @@ func (vlog *valueLog) doRunGC(gcThreshold float64, head valuePointer) (err error
 	}
 	vlog.elog.Printf("Fid: %d Data status=%+v\n", lf.fid, r)
 
-	if r.total < 10.0 || r.discard < gcThreshold*r.total {
+	log.Println(r.total < 10.0, r.discard < gcThreshold*r.total)
+	if r.total < 10.0 && r.discard < gcThreshold*r.total {
 		vlog.elog.Printf("Skipping GC on fid: %d\n\n", lf.fid)
+		//log.Println(r.total < 10.0, r.discard < gcThreshold*r.total)
+		//log.Printf("Skipping GC on fid: %d %f %f\n\n", lf.fid, r.total, r.discard)
 		return ErrNoRewrite
 	}
 
+	//log.Printf("GC on fid: %d\n\n", lf.fid)
 	vlog.elog.Printf("REWRITING VLOG %d\n", lf.fid)
 	if err = vlog.rewrite(lf); err != nil {
 		return err

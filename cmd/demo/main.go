@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 
 	"github.com/impact-eintr/lsmdb"
 )
@@ -17,18 +19,13 @@ func main() {
 
 	// 读写事务
 	err = db.Update(func(txn *lsmdb.Txn) error {
-		txn.Set([]byte("answer"), []byte("42"))
-		txn.Set([]byte("answer_v1"), []byte("43"))
-		txn.Set([]byte("answer_v2"), []byte("44"))
-		txn.Set([]byte("answer_v3"), []byte("45"))
-		txn.Get([]byte("answer"))
-		txn.Delete([]byte("answer"))
-		return nil
-	})
-
-	// 只读事务
-	err = db.View(func(txn *lsmdb.Txn) error {
-		txn.Get([]byte("answer_v1"))
+		kvb := []byte{}
+		for i := 0; i < 5; i++ {
+			kvb = appendKV(kvb, []byte(fmt.Sprintf("key%d", i)), []byte(fmt.Sprintf("value%d", i)), 1)
+			buf := make([]byte, len(kvb))
+			copy(buf, kvb)
+			txn.Set([]byte(fmt.Sprintf("test%d", i)), buf)
+		}
 		return nil
 	})
 
@@ -40,16 +37,27 @@ func main() {
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
-			k := item.Key()
-			//err := item.Value(func(v []byte) error {
-			//	fmt.Printf("key=%s, value=%s\n", k, v)
-			//	return nil
-			//})
 			v, err := item.Value()
-			fmt.Printf("key=%s, value=%s\n", k, v)
+			counter := 0
+			rangeKV(v, func(k, v []byte) error {
+				if !bytes.Equal(k, []byte(fmt.Sprintf("key%d", counter))) ||
+					!bytes.Equal(v, []byte(fmt.Sprintf("value%d", counter))) {
+					log.Println(string(k), string(v))
+				}
+				counter++
+				return nil
+			})
 			if err != nil {
 				return err
 			}
+		}
+		return nil
+	})
+
+	// 删除这些键
+	err = db.Update(func(txn *lsmdb.Txn) error {
+		for i := 0; i < 200; i++ {
+			txn.Delete([]byte(fmt.Sprintf("test%d", i)))
 		}
 		return nil
 	})
