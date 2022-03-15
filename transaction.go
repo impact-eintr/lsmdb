@@ -202,6 +202,15 @@ func (txn *Txn) Set(key, val []byte) error {
 	return txn.setEntry(e)
 }
 
+// Update delete a key-value pair then add it again with new value
+func (txn *Txn) Update(key, val []byte) error {
+	err := txn.Delete(key)
+	if err != nil {
+		return err
+	}
+	return txn.Set(key, val)
+}
+
 // SetWithMeta adds a key-value pair to the database, along with a metadata
 // byte. This byte is stored alongside the key, and can be used as an aid to
 // interpret the value or store other contextual bits corresponding to the
